@@ -1,0 +1,54 @@
+[project]
+name = "sihatod"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "SolitarySpiral",email = "solitary.ratty@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi (>=0.125.0,<0.126.0)",
+    "redis (>=7.1.0,<8.0.0)",
+    "uvicorn (>=0.38.0,<0.39.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.14.10,<0.15.0)",
+    "sphinx (>=9.0.4,<10.0.0)",
+    "sphinx-rtd-theme (>=3.0.2,<4.0.0)",
+    "sphinx-autodoc-typehints (>=3.6.0,<4.0.0)",
+    "pytest (>=9.0.2,<10.0.0)"
+]
+
+[tool.ruff]
+# Длина строки (стандарт сейчас 88 или 100, 79 уже маловато)
+line-length = 100
+# Версия питона, под которую линтим
+target-version = "py314"
+
+[tool.ruff.lint]
+# Какие правила включаем:
+# E, W - стандартные ошибки (как в pycodestyle)
+# F - pyflakes (баги, неиспользуемые переменные)
+# I - isort (сортировка импортов - это киллер-фича!)
+# B - flake8-bugbear (поиск неочевидных багов)
+select = ["E", "W", "F", "I", "B"]
+ignore = []
+
+[tool.ruff.lint.isort]
+# Группировать импорты правильно
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+# Указываем, что нужно добавить текущую директорию (корень проекта) в PYTHONPATH.
+# Это позволяет импортировать пакеты из 'app'.
+pythonpath = "." 
+python_files = "test_*.py" # Указываем, какие файлы считать тестами
+asyncio_mode = "auto"

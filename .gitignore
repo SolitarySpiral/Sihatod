@@ -1,0 +1,18 @@
+# Python Environment and Artifacts
+__pycache__/
+*.py[cod]
+.venv
+.env
+.pre-commit-config.yaml
+# IDE and Build
+.vscode/
+dist/
+*.egg-info/
+.coverage
+.pytest_cache
+# Sphinx Documentation
+docs/_build/
+# временное удаление
+docs/
+tests/
+setup_project.py
