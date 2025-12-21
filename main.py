@@ -1,13 +1,40 @@
 import hashlib
-from typing import Optional
+from typing import List, Optional
 
 import redis.asyncio as redis
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 app = FastAPI()
 # Подключаемся к Redis (имя хоста 'redis' берем из docker-compose)
 r = redis.from_url("redis://redis:6379", decode_responses=True)
+
+
+# Модель для входящего запроса
+class BatchRequest(BaseModel):
+    hashes: List[str]
+
+
+@app.post("/hash/batch")  # Используем POST для передачи списка
+async def get_batch_data(request: BatchRequest):
+    if not request.hashes:
+        return {"values": {}, "status": 200}
+
+    # Одним махом берем все значения из Redis
+    list_values = await r.mget(request.hashes)
+
+    # Собираем красивый словарь: { "hash": "value" }
+    # Используем zip, чтобы элегантно соединить списки
+    result = {
+        h: v if v is not None else None for h, v in zip(request.hashes, list_values, strict=True)
+    }
+
+    # Проверяем, нашлось ли хоть что-то
+    if all(v is None for v in result.values()):
+        raise HTTPException(status_code=404, detail="None of the hashes found")
+
+    return {"data": result, "status": 200}
 
 
 def get_hash(client_key: str, attr: str) -> str:
