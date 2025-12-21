@@ -53,5 +53,11 @@ async def delete_data(client_key: str, attr: str, addr: Optional[str] = None):
     return {"hash": target_addr, "deleted": True, "status": 200}
 
 
+@app.post("/admin/reset")
+async def reset_database():
+    await r.flushdb()
+    return {"message": "Database wiped clean", "status": 200}
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=5001)
