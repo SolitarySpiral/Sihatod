@@ -12,7 +12,10 @@ dist/
 .pytest_cache
 # Sphinx Documentation
 docs/_build/
+# критичные данные, как .env
+users.acl
 # временное удаление
 docs/
 tests/
 setup_project.py
+what*

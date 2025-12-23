@@ -1,90 +1,159 @@
 import hashlib
-from typing import List, Optional
+import logging
+import os
+from typing import Annotated, AsyncGenerator, List, Optional
 
 import redis.asyncio as redis
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, status
+from pydantic import BaseModel, Field
 
-app = FastAPI()
-# Подключаемся к Redis (имя хоста 'redis' берем из docker-compose)
-r = redis.from_url("redis://redis:6379", decode_responses=True)
+load_dotenv()  # Эта команда ищет файл .env и загружает его в os.environ
+# Настройка логирования для отслеживания инцидентов безопасности
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
-# Модель для входящего запроса
-class BatchRequest(BaseModel):
-    hashes: List[str]
-
-
-@app.post("/hash/batch")  # Используем POST для передачи списка
-async def get_batch_data(request: BatchRequest):
-    if not request.hashes:
-        return {"values": {}, "status": 200}
-
-    # Одним махом берем все значения из Redis
-    list_values = await r.mget(request.hashes)
-
-    # Собираем красивый словарь: { "hash": "value" }
-    # Используем zip, чтобы элегантно соединить списки
-    result = {
-        h: v if v is not None else None for h, v in zip(request.hashes, list_values, strict=True)
-    }
-
-    # Проверяем, нашлось ли хоть что-то
-    if all(v is None for v in result.values()):
-        raise HTTPException(status_code=404, detail="None of the hashes found")
-
-    return {"data": result, "status": 200}
+app = FastAPI(title="Sihatod Secure API", version="2.0.0")
 
 
-def get_hash(client_key: str, attr: str) -> str:
+# --- КОНФИГУРАЦИЯ ---
+REDIS_URL = os.environ.get("REDIS_URL")
+KEY_PREFIX = "sihatod:"
+
+if not REDIS_URL:
+    logger.critical("REDIS_URL is missing in environment variables")
+    raise RuntimeError("Application misconfigured: REDIS_URL required")
+
+
+# --- ЗАВИСИМОСТИ (DEPENDENCY INJECTION) ---
+async def get_redis() -> AsyncGenerator[redis.Redis, None]:
+    """Инжектирует соединение с Redis в эндпоинты."""
+    client = redis.from_url(REDIS_URL, decode_responses=True)
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+# Создаем алиас для зависимости, чтобы избежать B008 и дублирования кода
+RedisDep = Annotated[redis.Redis, Depends(get_redis)]
+
+
+# --- СЛУЖЕБНАЯ ЛОГИКА ---
+def to_safe_key(user_key: str) -> str:
+    """Гарантирует, что ключ соответствует ACL политикам (префикс sihatod:)."""
+    if user_key.startswith(KEY_PREFIX):
+        return user_key
+    return f"{KEY_PREFIX}{user_key}"
+
+
+def generate_internal_hash(client_key: str, attr: str) -> str:
+    """Создает детерминированный SHA-256 хеш."""
     payload = f"{client_key}:{attr}"
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+# --- МОДЕЛИ ДАННЫХ ---
+class BatchRequest(BaseModel):
+    hashes: List[str] = Field(..., min_items=1, description="Список хешей для поиска")
+
+
+# --- ЭНДПОИНТЫ ---
+
+
+@app.post("/hash/batch", status_code=status.HTTP_200_OK)
+async def get_batch_data(request: BatchRequest, db: RedisDep):
+    safe_keys = [to_safe_key(h) for h in request.hashes]
+
+    try:
+        list_values = await db.mget(safe_keys)
+    except redis.RedisError as err:
+        logger.error(f"Batch read failed: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database service unavailable"
+        ) from err
+
+    result = {
+        orig_h: val
+        for orig_h, val in zip(request.hashes, list_values, strict=True)
+        if val is not None
+    }
+
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Requested hashes not found"
+        ) from None
+
+    return {"data": result}
+
+
 @app.get("/hash/{client_key}/{attr}")
-async def get_data(client_key: str, attr: str, addr: Optional[str] = None):
-    # Если пришел готовый хеш, используем его, иначе генерируем
-    target_addr = addr if addr else get_hash(client_key, attr)
+async def get_data(client_key: str, attr: str, db: RedisDep, addr: Optional[str] = None):
+    raw_hash = addr or generate_internal_hash(client_key, attr)
+    target_key = to_safe_key(raw_hash)
 
-    val = await r.get(target_addr)
-    if not val:
-        raise HTTPException(status_code=404, detail="Not Found")
-    return {"hash": target_addr, "value": val, "status": 200}
+    try:
+        val = await db.get(target_key)
+    except redis.PermissionError as err:
+        logger.warning(f"ACL violation attempt for key {target_key}")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied") from err
+    except redis.RedisError as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage error"
+        ) from err
+
+    if val is None:
+        raise HTTPException(status_code=404, detail="Key not found") from None
+
+    return {"hash": raw_hash, "value": val}
 
 
-@app.put("/hash/{client_key}/{attr}")
-async def put_data(value: str, client_key: str, attr: str, addr: Optional[str] = None):
-    # Проверка значения (FastAPI сам может это делать через Body, но оставим так)
-    if value is None:
-        raise HTTPException(status_code=400, detail="No value to edit")
+@app.put("/hash/{client_key}/{attr}", status_code=status.HTTP_200_OK)
+async def put_data(
+    value: str,
+    client_key: str,
+    attr: str,
+    db: RedisDep,
+    addr: Optional[str] = None,
+):
+    raw_hash = addr or generate_internal_hash(client_key, attr)
+    target_key = to_safe_key(raw_hash)
 
-    target_addr = addr if addr else get_hash(client_key, attr)
+    try:
+        # Интоксикация данных: проверяем успешность записи
+        await db.set(target_key, value)
+    except redis.RedisError as err:
+        logger.error(f"Write operation failed for {target_key}: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to persist data"
+        ) from err
 
-    # Redis set возвращает True при успехе
-    success = await r.set(target_addr, value)
-    if not success:
-        raise HTTPException(status_code=500, detail="Database error")
-
-    return {"hash": target_addr, "status": 200}
+    return {"hash": raw_hash, "status": "success"}
 
 
 @app.delete("/hash/{client_key}/{attr}")
-async def delete_data(client_key: str, attr: str, addr: Optional[str] = None):
-    target_addr = addr if addr else get_hash(client_key, attr)
+async def delete_data(
+    client_key: str,
+    attr: str,
+    db: RedisDep,
+    addr: Optional[str] = None,
+):
+    raw_hash = addr or generate_internal_hash(client_key, attr)
+    target_key = to_safe_key(raw_hash)
 
-    deleted_count = await r.delete(target_addr)
-    if not deleted_count:
-        raise HTTPException(status_code=404, detail="Not Found")
+    try:
+        deleted = await db.delete(target_key)
+    except redis.RedisError as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Delete operation failed"
+        ) from err
 
-    return {"hash": target_addr, "deleted": True, "status": 200}
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Target not found") from None
 
-
-@app.post("/admin/reset")
-async def reset_database():
-    await r.flushdb()
-    return {"message": "Database wiped clean", "status": 200}
+    return {"hash": raw_hash, "deleted": True}
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5001)
+    uvicorn.run("main:app", host="0.0.0.0", port=5001, reload=False)

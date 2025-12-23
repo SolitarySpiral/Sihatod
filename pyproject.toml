@@ -10,7 +10,8 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi (>=0.125.0,<0.126.0)",
     "redis (>=7.1.0,<8.0.0)",
-    "uvicorn (>=0.38.0,<0.39.0)"
+    "uvicorn (>=0.38.0,<0.39.0)",
+    "python-dotenv (>=1.2.1,<2.0.0)"
 ]
 
 
