@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, AsyncGenerator, List, Optional
 from urllib.parse import urlparse
@@ -9,7 +10,10 @@ import redis.asyncio as redis
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi_limiter import FastAPILimiter
+from fastapi_limiter.depends import RateLimiter
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Вычисляем путь относительно этого файла (main.py)
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,7 +24,40 @@ load_dotenv()  # Эта команда ищет файл .env и загружа�
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Sihatod Secure API", version="2.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1. Создаем отдельное долгоживущее соединение для лимитера
+    # Используем твои настройки из get_redis
+    url = urlparse(REDIS_URL)
+    limiter_redis = redis.Redis(
+        host=url.hostname,
+        port=url.port or 6379,
+        username=url.username,
+        password=url.password,
+        db=int(url.path.lstrip("/") or 0),
+        decode_responses=True,
+        ssl=True,
+        ssl_ca_certs=str(CERTS_DIR / "ca.crt"),
+        ssl_certfile=str(CERTS_DIR / "redis.crt"),
+        ssl_keyfile=str(CERTS_DIR / "redis.key"),
+        ssl_check_hostname=True,
+        ssl_cert_reqs="required",
+    )
+
+    # 2. Инициализируем лимитер этим соединением
+    await FastAPILimiter.init(limiter_redis, prefix="sihatod-limiter")
+
+    logger.info("🛡️ FastAPILimiter initialized with dedicated mTLS connection")
+
+    yield  # Здесь приложение принимает запросы
+
+    # 3. Закрываем соединение лимитера только при остановке приложения
+    await limiter_redis.aclose()
+    logger.info("🛑 FastAPILimiter connection closed")
+
+
+app = FastAPI(title="Sihatod Secure API", version="2.0.0", lifespan=lifespan)
 
 
 # --- КОНФИГУРАЦИЯ ---
@@ -31,6 +68,18 @@ if not REDIS_URL:
     logger.critical("REDIS_URL is missing in environment variables")
     raise RuntimeError("Application misconfigured: REDIS_URL required")
 
+
+# 3. Security Headers Middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # --- ЗАВИСИМОСТИ (DEPENDENCY INJECTION) ---
 
@@ -80,13 +129,21 @@ def generate_internal_hash(client_key: str, attr: str) -> str:
 
 # --- МОДЕЛИ ДАННЫХ ---
 class BatchRequest(BaseModel):
-    hashes: List[str] = Field(..., min_items=1, description="Список хешей для поиска")
+    # Применяем строгий режим ко всей модели
+    model_config = ConfigDict(strict=True)
+    hashes: List[str] = Field(
+        ..., min_items=1, max_length=1024 * 1024, description="Список хешей для поиска"
+    )
 
 
 # --- ЭНДПОИНТЫ ---
 
 
-@app.post("/hash/batch", status_code=status.HTTP_200_OK)
+@app.post(
+    "/hash/batch",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(RateLimiter(times=5, seconds=10))],
+)
 async def get_batch_data(request: BatchRequest, db: RedisDep):
     safe_keys = [to_safe_key(h) for h in request.hashes]
 
@@ -117,7 +174,11 @@ async def get_batch_data(request: BatchRequest, db: RedisDep):
     return {"data": result}
 
 
-@app.get("/hash/{client_key}/{attr}")
+@app.get(
+    "/hash/{client_key}/{attr}",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(RateLimiter(times=5, seconds=10))],
+)
 async def get_data(client_key: str, attr: str, db: RedisDep, addr: Optional[str] = None):
     raw_hash = addr or generate_internal_hash(client_key, attr)
     target_key = to_safe_key(raw_hash)
@@ -140,7 +201,11 @@ async def get_data(client_key: str, attr: str, db: RedisDep, addr: Optional[str]
     return {"hash": raw_hash, "value": val}
 
 
-@app.put("/hash/{client_key}/{attr}", status_code=status.HTTP_200_OK)
+@app.put(
+    "/hash/{client_key}/{attr}",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(RateLimiter(times=5, seconds=10))],
+)
 async def put_data(
     value: str,
     client_key: str,
@@ -168,7 +233,11 @@ async def put_data(
     return {"hash": raw_hash, "status": "success"}
 
 
-@app.delete("/hash/{client_key}/{attr}")
+@app.delete(
+    "/hash/{client_key}/{attr}",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(RateLimiter(times=5, seconds=10))],
+)
 async def delete_data(
     client_key: str,
     attr: str,

@@ -443,6 +443,22 @@ standard = ["email-validator (>=2.0.0)", "fastapi-cli[standard] (>=0.0.8)", "htt
 standard-no-fastapi-cloud-cli = ["email-validator (>=2.0.0)", "fastapi-cli[standard-no-fastapi-cloud-cli] (>=0.0.8)", "httpx (>=0.23.0,<1.0.0)", "jinja2 (>=3.1.5)", "python-multipart (>=0.0.18)", "uvicorn[standard] (>=0.12.0)"]
 
 [[package]]
+name = "fastapi-limiter"
+version = "0.1.6"
+description = "A request rate limiter for fastapi"
+optional = false
+python-versions = ">=3.9,<4.0"
+groups = ["main"]
+files = [
+    {file = "fastapi_limiter-0.1.6-py3-none-any.whl", hash = "sha256:2e53179a4208b8f2c8795e38bb001324d3dc37d2800ff49fd28ec5caabf7a240"},
+    {file = "fastapi_limiter-0.1.6.tar.gz", hash = "sha256:6f5fde8efebe12eb33861bdffb91009f699369a3c2862cdc7c1d9acf912ff443"},
+]
+
+[package.dependencies]
+fastapi = "*"
+redis = ">=4.2.0rc1"
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 description = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
@@ -1221,5 +1237,5 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.6.3)
 
 [metadata]
 lock-version = "2.1"
-python-versions = ">=3.14"
-content-hash = "9285db9e998638f2f26697c43677ddf1f8595ccbe33d12dd2213b747a45ab565"
+python-versions = ">=3.14, <4.0"
+content-hash = "6f75b6fdd50b8bd6a15f3f19f6f1d461a76a2ef1cef03e631a889000511b8dd8"
