@@ -1,13 +1,19 @@
 import hashlib
 import logging
 import os
+from pathlib import Path
 from typing import Annotated, AsyncGenerator, List, Optional
+from urllib.parse import urlparse
 
 import redis.asyncio as redis
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+
+# Вычисляем путь относительно этого файла (main.py)
+BASE_DIR = Path(__file__).resolve().parent
+CERTS_DIR = BASE_DIR / "certs"
 
 load_dotenv()  # Эта команда ищет файл .env и загружает его в os.environ
 # Настройка логирования для отслеживания инцидентов безопасности
@@ -27,13 +33,31 @@ if not REDIS_URL:
 
 
 # --- ЗАВИСИМОСТИ (DEPENDENCY INJECTION) ---
+
+
 async def get_redis() -> AsyncGenerator[redis.Redis, None]:
-    """Инжектирует соединение с Redis в эндпоинты."""
-    client = redis.from_url(REDIS_URL, decode_responses=True)
+    # 1. Парсим REDIS_URL из .env
+    url = urlparse(REDIS_URL)
+
+    client = redis.Redis(
+        host=url.hostname,
+        port=url.port or 6379,
+        username=url.username,
+        password=url.password,
+        db=int(url.path.lstrip("/") or 0),
+        decode_responses=True,
+        ssl=True,
+        ssl_ca_certs=str(CERTS_DIR / "ca.crt"),
+        ssl_certfile=str(CERTS_DIR / "redis.crt"),
+        ssl_keyfile=str(CERTS_DIR / "redis.key"),
+        ssl_check_hostname=True,
+        ssl_cert_reqs="required",
+    )
     try:
         yield client
     finally:
-        await client.close()
+        # Важно: в asyncio используем aclose()
+        await client.aclose()
 
 
 # Создаем алиас для зависимости, чтобы избежать B008 и дублирования кода
@@ -68,6 +92,11 @@ async def get_batch_data(request: BatchRequest, db: RedisDep):
 
     try:
         list_values = await db.mget(safe_keys)
+    except redis.ResponseError as err:  # Для ACL ошибок
+        if "NOPERM" in str(err):
+            logger.warning("ACL violation attempt")
+            raise HTTPException(status_code=403, detail="Access denied") from err
+        raise
     except redis.RedisError as err:
         logger.error(f"Batch read failed: {err}")
         raise HTTPException(
@@ -95,9 +124,11 @@ async def get_data(client_key: str, attr: str, db: RedisDep, addr: Optional[str]
 
     try:
         val = await db.get(target_key)
-    except redis.PermissionError as err:
-        logger.warning(f"ACL violation attempt for key {target_key}")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied") from err
+    except redis.ResponseError as err:  # Для ACL ошибок
+        if "NOPERM" in str(err):
+            logger.warning("ACL violation attempt")
+            raise HTTPException(status_code=403, detail="Access denied") from err
+        raise
     except redis.RedisError as err:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage error"
@@ -123,6 +154,11 @@ async def put_data(
     try:
         # Интоксикация данных: проверяем успешность записи
         await db.set(target_key, value)
+    except redis.ResponseError as err:  # Для ACL ошибок
+        if "NOPERM" in str(err):
+            logger.warning("ACL violation attempt")
+            raise HTTPException(status_code=403, detail="Access denied") from err
+        raise
     except redis.RedisError as err:
         logger.error(f"Write operation failed for {target_key}: {err}")
         raise HTTPException(
@@ -144,6 +180,11 @@ async def delete_data(
 
     try:
         deleted = await db.delete(target_key)
+    except redis.ResponseError as err:  # Для ACL ошибок
+        if "NOPERM" in str(err):
+            logger.warning("ACL violation attempt")
+            raise HTTPException(status_code=403, detail="Access denied") from err
+        raise
     except redis.RedisError as err:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Delete operation failed"
