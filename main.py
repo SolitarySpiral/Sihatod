@@ -230,6 +230,10 @@ class BatchRequest(BaseModel):
     )
 
 
+class AttributeUpdate(BaseModel):
+    value: str
+
+
 # --- ЭНДПОИНТЫ ---
 
 
@@ -245,8 +249,16 @@ async def get_batch_data(
 ):
     safe_keys = [to_safe_key(h) for h in request.hashes]
 
+    encrypted_data = await db.mget(safe_keys)
+    if not encrypted_data:
+        raise HTTPException(status_code=404, detail="Not found")
     try:
-        list_values = await db.mget(safe_keys)
+        # 2. Расшифровываем данные ПРИ получении из Redis
+        from crypto import protector
+
+        decrypted_values = [
+            protector.decrypt(encrypted_value) for encrypted_value in encrypted_data
+        ]
     except redis.ResponseError as err:  # Для ACL ошибок
         if "NOPERM" in str(err):
             logger.warning("ACL violation attempt")
@@ -260,7 +272,7 @@ async def get_batch_data(
 
     result = {
         orig_h: val
-        for orig_h, val in zip(request.hashes, list_values, strict=True)
+        for orig_h, val in zip(request.hashes, decrypted_values, strict=True)
         if val is not None
     }
 
@@ -283,8 +295,14 @@ async def get_data(
     raw_hash = addr or generate_internal_hash(client_key, attr)
     target_key = to_safe_key(raw_hash)
 
+    encrypted_data = await db.get(target_key)
+    if not encrypted_data:
+        raise HTTPException(status_code=404, detail="Not found")
+        # 2. Расшифровываем данные ПРИ получении из Redis
+    from crypto import protector
+
     try:
-        val = await db.get(target_key)
+        decrypted_value = protector.decrypt(encrypted_data)
     except redis.ResponseError as err:  # Для ACL ошибок
         if "NOPERM" in str(err):
             logger.warning("ACL violation attempt")
@@ -295,10 +313,7 @@ async def get_data(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage error"
         ) from err
 
-    if val is None:
-        raise HTTPException(status_code=404, detail="Key not found") from None
-
-    return {"hash": raw_hash, "value": val}
+    return {"value": decrypted_value, "hash": raw_hash}
 
 
 @app.put(
@@ -307,19 +322,23 @@ async def get_data(
     dependencies=[Depends(RateLimiter(times=5, seconds=10))],
 )
 async def put_data(
-    value: str,
+    data: AttributeUpdate,
     client_key: str,
     attr: str,
     db: RedisDep,
     current_user: UserDep,
     addr: Optional[str] = None,
 ):
+    # 1. Шифруем данные ПЕРЕД отправкой в Redis
+    from crypto import protector
+
+    encrypted_value = protector.encrypt(data.value)
     raw_hash = addr or generate_internal_hash(client_key, attr)
     target_key = to_safe_key(raw_hash)
 
     try:
         # Интоксикация данных: проверяем успешность записи
-        await db.set(target_key, value)
+        await db.set(target_key, encrypted_value)
     except redis.ResponseError as err:  # Для ACL ошибок
         if "NOPERM" in str(err):
             logger.warning("ACL violation attempt")

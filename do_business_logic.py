@@ -73,7 +73,7 @@ class SihatodSecureClient:
     # --- Бизнес-методы (обертки над API) ---
 
     async def put_attr(self, client_key: str, attr: str, value: str):
-        return await self.request("PUT", f"/hash/{client_key}/{attr}", params={"value": value})
+        return await self.request("PUT", f"/hash/{client_key}/{attr}", json_data={"value": value})
 
     async def get_attr(self, client_key: str, attr: str):
         return await self.request("GET", f"/hash/{client_key}/{attr}")
