@@ -1,78 +1,126 @@
 import asyncio
+import logging
+from typing import Any, Dict, List, Optional
 
 import httpx
+from pydantic import BaseModel
 
-from main import BatchRequest
-
-
-async def do_api(
-    method: str, client_key: str, attr: str, value: str = None, request: BatchRequest = None
-):
-    url = f"http://localhost:5001/hash/{client_key}/{attr}"
-    params = {"value": value} if value else {}
-
-    if request:
-        url = "http://localhost:5001/hash/batch"
-        params = request.hashes
-        async with httpx.AsyncClient() as client:
-            try:
-                if method.upper() == "POST":
-                    response = await client.post(url, json=request.model_dump())
-
-                return response.json()
-            except Exception as e:
-                return {"error": str(e)}
-
-    else:
-        async with httpx.AsyncClient() as client:
-            try:
-                if method.upper() == "PUT":
-                    response = await client.put(url, params=params)
-                elif method.upper() == "DELETE":
-                    response = await client.delete(url)
-                else:
-                    response = await client.get(url)
-
-                return response.json()
-            except Exception as e:
-                return {"error": str(e)}
+# Настраиваем логи, чтобы видеть, что происходит
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger("SihatodClient")
 
 
-async def business_logic_example():
-    print("🚀 Запуск примера бизнес-логики...")
-    list_hashes = []
-    dict_attrs = {"account_type": "checking", "account": "30601810"}
-    dict_attrs_hashes = {}
+# Модель для батч-запросов (дублируем из main.py для удобства)
+class BatchRequest(BaseModel):
+    hashes: List[str]
 
-    # 1. Создаем счет для клиента (PUT)
-    for key, value in dict_attrs.items():
-        res = await do_api("PUT", "user_1", attr=key, value=value)
-        print(f"✅ Создано: {res}")
 
-    # 2. Получаем этот счет (GET)
-    for key, value in dict_attrs.items():
-        data = await do_api("GET", "user_1", key)
-        print(f"🔍 Получено из БД: {data['value']} (Хеш: {data['hash']})")
-        dict_attrs_hashes[key] = data["hash"]
-        list_hashes.append(data["hash"])
+class SihatodSecureClient:
+    def __init__(self, base_url: str = "https://localhost:5001"):
+        # ВАЖНО: Мы используем https и указываем путь к CA сертификату
+        # verify="certs/ca.crt" заставляет клиента доверять нашему самописному сертификату
+        self.base_url = base_url
+        self.client = httpx.AsyncClient(
+            base_url=base_url,
+            verify="certs/ca.crt",  # Проверяем SSL как взрослые
+            timeout=10.0,
+        )
 
-    # 3. Кладем аттрибуты клиента, чтобы знать, что у него есть
-    res = await do_api("PUT", "user_1", "user_attrs", dict_attrs_hashes)
-    print(f"✅ Создано: {res}")
+    async def __aenter__(self):
+        return self
 
-    # 4. Проверяем, что в БД есть список аттрибутов нашего пользователя
-    data = await do_api("GET", "user_1", "user_attrs")
-    print(f"🔍 Получено из БД: {data['value']} (Хеш: {data['hash']})")
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.client.aclose()
 
-    # 5. Получаем значения всех аттрибутов в БД по пользователю
-    request = BatchRequest(hashes=list_hashes)
-    data = await do_api("POST", None, None, request=request)
-    print(f"🔍 Получено из БД: {data}")
+    async def login(self, username: str, password: str) -> bool:
+        """Аутентификация и получение HttpOnly Cookies"""
+        try:
+            response = await self.client.post(
+                "/auth/login", json={"username": username, "password": password}
+            )
+            response.raise_for_status()
+            logger.info("✅ Login successful. Cookies secured.")
+            return True
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Login failed: {e.response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Connection error: {str(e)}")
+            return False
 
-    # 6. Красиво отобразим
-    for key, value in dict_attrs_hashes.items():
-        print(f"{key}={data['data'][value]}")
+    async def request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """Универсальная обертка для запросов с автоматической отправкой кук"""
+        try:
+            response = await self.client.request(method, endpoint, params=params, json=json_data)
+
+            # Если токен протух (401), здесь можно дописать логику вызова /auth/refresh
+            if response.status_code == 401:
+                logger.warning("⚠️ Token expired or invalid.")
+
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Request failed [{method} {endpoint}]: {e.response.text}")
+            return {"error": str(e), "details": e.response.text}
+
+    # --- Бизнес-методы (обертки над API) ---
+
+    async def put_attr(self, client_key: str, attr: str, value: str):
+        return await self.request("PUT", f"/hash/{client_key}/{attr}", json_data={"value": value})
+
+    async def get_attr(self, client_key: str, attr: str):
+        return await self.request("GET", f"/hash/{client_key}/{attr}")
+
+    async def get_batch(self, hashes: List[str]):
+        payload = BatchRequest(hashes=hashes).model_dump()
+        return await self.request("POST", "/hash/batch", json_data=payload)
+
+
+async def main():
+    logger.info("🚀 Запуск защищенного клиента Sihatod...")
+
+    # Используем контекстный менеджер (он сам закроет соединение в конце)
+    async with SihatodSecureClient() as app:
+        # 1. Сначала нужно войти в систему
+        if not await app.login("admin", "secret"):
+            logger.critical("Не удалось войти. Завершение работы.")
+            return
+
+        # Данные для теста
+        user_id = "user_1"
+        dict_attrs = {"account_type": "checking", "currency": "RUB", "balance": "100500"}
+        collected_hashes = []
+
+        # 2. Создаем атрибуты (PUT)
+        logger.info("--- 📝 Запись данных ---")
+        for key, value in dict_attrs.items():
+            res = await app.put_attr(user_id, key, value)
+            # Если вернулась ошибка авторизации - прерываем
+            if "error" in res:
+                break
+            print(f"Created {key}: {res}")
+
+        # 3. Читаем атрибуты (GET)
+        logger.info("--- 🔍 Чтение данных ---")
+        for key in dict_attrs.keys():
+            data = await app.get_attr(user_id, key)
+            if "hash" in data:
+                print(f"Read {key}: {data['value']} (Hash: {data['hash']})")
+                collected_hashes.append(data["hash"])
+
+        # 4. Пакетный запрос (BATCH)
+        if collected_hashes:
+            logger.info("--- 📦 Пакетный запрос ---")
+            batch_res = await app.get_batch(collected_hashes)
+            print(f"Batch Result: {batch_res}")
 
 
 if __name__ == "__main__":
-    asyncio.run(business_logic_example())
+    asyncio.run(main())

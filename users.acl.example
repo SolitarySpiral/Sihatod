@@ -1,0 +1,2 @@
+user default off
+user sihatod_app on >INSERT_YOUR_PASSWORD ~sihatod:* +@all +script|load +eval

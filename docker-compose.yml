@@ -1,17 +1,29 @@
 services:
   app:
     build: .
+    working_dir: /app
     ports:
       - "5001:5001"
     depends_on:
       - redis
+    # !!! ВАЖНО: Добавляем эту строку, чтобы Python видел REDIS_URL !!!
+    env_file:
+      - .env
+    volumes:
+      - .:/app
   redis:
-    image: redis:7-alpine
+    image: redis:7.2-alpine
+    container_name: sihatod_redis
+    restart: always
+    # Вот эта команда запускает Redis с нашими настройками
+    command: redis-server /usr/local/etc/redis/redis.conf --appendonly yes
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+      - ./users.acl:/usr/local/etc/redis/users.acl
+      - ./certs:/usr/local/etc/redis/certs  # Пробрасываем сертификаты
+      - redis_data:/data
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes # Включаем сохранение на диск
 
 volumes:
   redis_data:
