@@ -9,11 +9,14 @@ from urllib.parse import urlparse
 import redis.asyncio as redis
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.middleware.base import BaseHTTPMiddleware
+
+from auth import AuthService
 
 # Вычисляем путь относительно этого файла (main.py)
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,29 +60,55 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 FastAPILimiter connection closed")
 
 
-app = FastAPI(title="Sihatod Secure API", version="2.0.0", lifespan=lifespan)
-
-
 # --- КОНФИГУРАЦИЯ ---
 REDIS_URL = os.environ.get("REDIS_URL")
 KEY_PREFIX = "sihatod:"
+# Отключаем документацию на проде через переменную окружения
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 if not REDIS_URL:
     logger.critical("REDIS_URL is missing in environment variables")
     raise RuntimeError("Application misconfigured: REDIS_URL required")
+app = FastAPI(
+    title="Sihatod Secure API",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if DEBUG else None,
+    redoc_url="/redoc" if DEBUG else None,
+)
+# 1. Защита от подмены Host
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "sihatod.com"])
+
+# 2. Строгий CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://sihatod.com"],  # Никаких "*"
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
-# 3. Security Headers Middleware
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        return response
+# 3. Security Headers
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # 1. Защита от MIME-sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # 2.Запрещаем вставку в iframe Защита от кликджекинга
+    response.headers["X-Frame-Options"] = "DENY"
+    # 3. Усиленный HSTS (2 года + preload)
+    # Это заставляет браузер всегда использовать HTTPS
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    # 4. Content Security Policy (НОВИНКА)
+    # default-src 'self' — разрешает контент только с твоего домена.
+    # frame-ancestors 'none' — запрещает встраивать твой API в любые фреймы.
+    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none';"
+    # 5. Реферер (Конфиденциальность)
+    # Не передает адрес твоего API при переходе по внешним ссылкам
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
-
-app.add_middleware(SecurityHeadersMiddleware)
 
 # --- ЗАВИСИМОСТИ (DEPENDENCY INJECTION) ---
 
@@ -111,6 +140,71 @@ async def get_redis() -> AsyncGenerator[redis.Redis, None]:
 
 # Создаем алиас для зависимости, чтобы избежать B008 и дублирования кода
 RedisDep = Annotated[redis.Redis, Depends(get_redis)]
+
+# --- АУТЕНТИФИКАЦИЯ (DEPENDENCIES & ROUTES) ---
+
+
+# Зависимость для защиты роутов
+async def get_current_user(request: Request) -> str:
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    # AuthService не требует состояния Redis для валидации Access токена (stateless)
+    # Но если нужно проверить бан пользователя, можно прокинуть Redis
+    auth = AuthService(None)
+    return auth.verify_access_token(token)
+
+
+UserDep = Annotated[str, Depends(get_current_user)]
+
+
+# Модель для логина (простая)
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# --- ЭНДПОИНТЫ АВТОРИЗАЦИИ ---
+
+
+@app.post("/auth/login")
+async def login(creds: LoginRequest, response: Response, db: RedisDep):
+    # В РЕАЛЬНОСТИ: Сверить хеш пароля из БД
+    # Для примера хардкодим тестового юзера
+    if creds.username != "admin" or creds.password != "secret":
+        raise HTTPException(status_code=401, detail="Bad credentials")
+
+    auth = AuthService(db)
+    access, refresh = auth.create_tokens(user_id="user_1")  # ID пользователя из БД
+
+    auth.set_cookies(response, access, refresh)
+    return {"status": "logged_in"}
+
+
+@app.post("/auth/refresh")
+async def refresh_tokens(request: Request, response: Response, db: RedisDep):
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+
+    auth = AuthService(db)
+    # Магия ротации: старый токен умирает, рождается новый
+    new_access, new_refresh = await auth.rotate_tokens(refresh_token)
+
+    auth.set_cookies(response, new_access, new_refresh)
+    return {"status": "refreshed"}
+
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    AuthService.clear_cookies(response)
+    return {"status": "logged_out"}
+
+
+@app.get("/auth/me")
+async def me(user_id: UserDep):
+    return {"user_id": user_id, "status": "authenticated"}
 
 
 # --- СЛУЖЕБНАЯ ЛОГИКА ---
@@ -144,7 +238,11 @@ class BatchRequest(BaseModel):
     status_code=status.HTTP_200_OK,
     dependencies=[Depends(RateLimiter(times=5, seconds=10))],
 )
-async def get_batch_data(request: BatchRequest, db: RedisDep):
+async def get_batch_data(
+    request: BatchRequest,
+    db: RedisDep,
+    current_user: UserDep,
+):
     safe_keys = [to_safe_key(h) for h in request.hashes]
 
     try:
@@ -179,7 +277,9 @@ async def get_batch_data(request: BatchRequest, db: RedisDep):
     status_code=status.HTTP_200_OK,
     dependencies=[Depends(RateLimiter(times=5, seconds=10))],
 )
-async def get_data(client_key: str, attr: str, db: RedisDep, addr: Optional[str] = None):
+async def get_data(
+    client_key: str, attr: str, db: RedisDep, current_user: UserDep, addr: Optional[str] = None
+):
     raw_hash = addr or generate_internal_hash(client_key, attr)
     target_key = to_safe_key(raw_hash)
 
@@ -211,6 +311,7 @@ async def put_data(
     client_key: str,
     attr: str,
     db: RedisDep,
+    current_user: UserDep,
     addr: Optional[str] = None,
 ):
     raw_hash = addr or generate_internal_hash(client_key, attr)
@@ -242,6 +343,7 @@ async def delete_data(
     client_key: str,
     attr: str,
     db: RedisDep,
+    current_user: UserDep,
     addr: Optional[str] = None,
 ):
     raw_hash = addr or generate_internal_hash(client_key, attr)
