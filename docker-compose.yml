@@ -9,21 +9,49 @@ services:
     # !!! ВАЖНО: Добавляем эту строку, чтобы Python видел REDIS_URL !!!
     env_file:
       - .env
+    secrets:
+      - source: redis_crt
+        target: redis.crt
+      - source: redis_key
+        target: redis.key
+      - source: ca_crt
+        target: ca.crt
+      - source: jwt_private
+        target: jwt_private.pem  # <-- Теперь имя файла будет правильным!
+      - source: jwt_public
+        target: jwt_public.pem
+      - source: master_key
+        target: master_key
     volumes:
       - .:/app
   redis:
     image: redis:7.2-alpine
     container_name: sihatod_redis
-    restart: always
-    # Вот эта команда запускает Redis с нашими настройками
     command: redis-server /usr/local/etc/redis/redis.conf --appendonly yes
     volumes:
-      - ./redis.conf:/usr/local/etc/redis/redis.conf
-      - ./users.acl:/usr/local/etc/redis/users.acl
-      - ./certs:/usr/local/etc/redis/certs  # Пробрасываем сертификаты
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./users.acl:/usr/local/etc/redis/users.acl:ro
       - redis_data:/data
+    secrets:
+      - redis_crt
+      - redis_key
+      - ca_crt
     ports:
       - "6379:6379"
+
+secrets:
+  redis_crt:
+    file: ./certs/redis.crt
+  redis_key:
+    file: ./certs/redis.key
+  ca_crt:
+    file: ./certs/ca.crt
+  jwt_private:
+    file: ./certs/jwt_private.pem
+  jwt_public:
+    file: ./certs/jwt_public.pem
+  master_key:
+    file: ./master.key # Создай этот файл один раз вручную
 
 volumes:
   redis_data:

@@ -44,10 +44,24 @@ def make_request(method, path, body=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Использование: python client_request.py [METHOD] [PATH]")
+        print("Использование: python client_request.py [METHOD] [PATH] [VALUE/JSON]")
     else:
-        m = sys.argv[1]
-        p = sys.argv[2]
-        # Для простоты: если нужен PUT с телом, добавим его третьим аргументом как JSON-строку
-        b = json.loads(sys.argv[3]) if len(sys.argv) > 3 else None
-        make_request(m, p, b)
+        method = sys.argv[1].upper()
+        path = sys.argv[2]
+
+        body = None
+        if len(sys.argv) > 3:
+            val = sys.argv[3]
+            # Логика: если путь содержит 'batch', парсим как чистый JSON.
+            # В остальных случаях (PUT) оборачиваем в {"value": ...}
+            if "batch" in path.lower():
+                try:
+                    body = json.loads(val)
+                except json.JSONDecodeError:
+                    print("❌ Ошибка: Для batch-запроса нужен валидный JSON")
+                    sys.exit(1)
+            else:
+                # Автоматическая обертка для обычных PUT запросов
+                body = {"value": val}
+
+        make_request(method, path, body)

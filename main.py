@@ -20,7 +20,7 @@ from auth import AuthService
 
 # Вычисляем путь относительно этого файла (main.py)
 BASE_DIR = Path(__file__).resolve().parent
-CERTS_DIR = BASE_DIR / "certs"
+CERTS_DIR = Path("/run/secrets/")  # BASE_DIR / "certs"
 
 load_dotenv()  # Эта команда ищет файл .env и загружает его в os.environ
 # Настройка логирования для отслеживания инцидентов безопасности

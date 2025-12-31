@@ -14,6 +14,7 @@ dist/
 docs/_build/
 # критичные данные, как .env
 users.acl
+master_key.key
 certs/
 # временное удаление
 docs/
