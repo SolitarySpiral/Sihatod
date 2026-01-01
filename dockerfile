@@ -21,13 +21,12 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-root --only main
 
 # 5. Копирование кода
-COPY . .
+COPY main.py auth.py crypto.py ./
 
 # 6. Права доступа
-# Ограничиваем права: пользователь должен владеть кодом, 
-# но сертификаты в идеале должны быть доступны только на чтение
+# Устанавливаем права: только чтение кода для пользователя
 RUN chown -R sihatoduser:sihatodgroup /app && \
-    chmod -R 755 /app
+    chmod -R 550 /app
 
 # 7. Безопасность
 USER 10001
