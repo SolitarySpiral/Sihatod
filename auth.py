@@ -1,3 +1,4 @@
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
@@ -13,14 +14,22 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 ALGORITHM = "EdDSA"
 
 
-# Загрузка ключей (читаем при старте модуля)
-def load_key(filename):
-    with open(filename, "rb") as f:
-        return f.read()
+def get_secret(name):
+    path = f"/run/secrets/{name}"
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    # Если файла нет, пробуем ENV
+    val = os.getenv(name.upper().replace(".", "_"))
+    if not val:
+        raise RuntimeError(
+            f"Критическая ошибка: Секрет {name} не найден ни в /run/secrets/, ни в ENV"
+        )
+    return val.encode()
 
 
-PRIVATE_KEY = serialization.load_pem_private_key(load_key("certs/jwt_private.pem"), password=None)
-PUBLIC_KEY = serialization.load_pem_public_key(load_key("certs/jwt_public.pem"))
+PRIVATE_KEY = serialization.load_pem_private_key(get_secret("jwt_private.pem"), password=None)
+PUBLIC_KEY = serialization.load_pem_public_key(get_secret("jwt_public.pem"))
 
 
 class AuthService:
