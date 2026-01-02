@@ -387,4 +387,6 @@ async def delete_data(
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=5001, reload=False)
+    # Читаем из окружения, по умолчанию ставим безопасный localhost
+    listen_host = os.getenv("APP_HOST", "127.0.0.1")
+    uvicorn.run("main:app", host=listen_host, port=5001, reload=False)

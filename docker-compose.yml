@@ -51,7 +51,7 @@ secrets:
   jwt_public:
     file: ./certs/jwt_public.pem
   master_key:
-    file: ./master.key # Создай этот файл один раз вручную
+    file: ./master_key.key
 
 volumes:
   redis_data:
