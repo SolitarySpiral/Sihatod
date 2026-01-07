@@ -6,10 +6,12 @@ from typing import Annotated, AsyncGenerator, List, Optional
 
 import redis.asyncio as redis
 import uvicorn
+from aiocircuitbreaker import CircuitBreaker
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from loguru import logger
@@ -18,13 +20,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from audit_middleware import AuditMiddleware
 from auth import AuthService
 from config import settings
+from mlock import lock_memory
 
 # Вычисляем путь относительно этого файла (main.py)
 BASE_DIR = Path(__file__).resolve().parent
 CERTS_DIR = settings.certs_path  # Path("/run/secrets/")  # BASE_DIR / "certs"
 
-load_dotenv()  # Эта команда ищет файл .env и загружает его в os.environ
+# Настраиваем: если 5 ошибок подряд — размыкаем цепь на 30 секунд
+cb = CircuitBreaker(failure_threshold=5, recovery_timeout=30)
 
+load_dotenv()  # Эта команда ищет файл .env и загружает его в os.environ
+lock_memory()  # Эта команда запрещает системе сбрасывать память на диск
 
 # Настройка красивого вывода (можно вынести в отдельную функцию setup_logging)
 logger.remove()
@@ -216,6 +222,45 @@ async def me(user_id: UserDep):
     return {"user_id": user_id, "status": "authenticated"}
 
 
+# --- ЭНДПОИНТ ЗДОРОВЬЯ ---
+
+
+@app.get("/health", tags=["system"])
+async def health_check(db: RedisDep):
+    """
+    Проверка здоровья:
+    1. Приложение дышит?
+    2. Redis доступен?
+    3. Предохранитель не выбит?
+    """
+    health_report = {
+        "status": "ok",
+        "components": {"app": "healthy", "redis": "unknown", "circuit_breaker": "closed"},
+    }
+
+    # Проверяем состояние предохранителя через его внутренние атрибуты
+    # В aiocircuitbreaker это делается через state
+    if cb.state == "open":
+        health_report["status"] = "degraded"
+        health_report["components"]["circuit_breaker"] = "open"
+        return JSONResponse(status_code=503, content=health_report)
+
+    try:
+        # Оборачиваем вызов в предохранитель
+        with cb:
+            await db.ping()
+
+        health_report["components"]["redis"] = "connected"
+        return health_report
+
+    except Exception as err:
+        logger.exception(err)
+        health_report["status"] = "error"
+        health_report["components"]["redis"] = str(err)
+        # Возвращаем 503, чтобы Docker/K8s знали, что узел не готов
+        return JSONResponse(status_code=503, content=health_report)
+
+
 # --- СЛУЖЕБНАЯ ЛОГИКА ---
 def to_safe_key(user_key: str) -> str:
     """Гарантирует, что ключ соответствует ACL политикам (префикс sihatod:)."""
@@ -257,8 +302,8 @@ async def get_batch_data(
     current_user: UserDep,
 ):
     safe_keys = [to_safe_key(h) for h in request.hashes]
-
-    encrypted_data = await db.mget(safe_keys)
+    with cb:
+        encrypted_data = await db.mget(safe_keys)
     if not encrypted_data:
         raise HTTPException(status_code=404, detail="Not found")
     try:
@@ -303,8 +348,8 @@ async def get_data(
 ):
     raw_hash = addr or generate_internal_hash(client_key, attr)
     target_key = to_safe_key(raw_hash)
-
-    encrypted_data = await db.get(target_key)
+    with cb:
+        encrypted_data = await db.get(target_key)
     if not encrypted_data:
         raise HTTPException(status_code=404, detail="Not found")
         # 2. Расшифровываем данные ПРИ получении из Redis
@@ -346,8 +391,9 @@ async def put_data(
     target_key = to_safe_key(raw_hash)
 
     try:
-        # Интоксикация данных: проверяем успешность записи
-        await db.set(target_key, encrypted_value)
+        with cb:
+            # Интоксикация данных: проверяем успешность записи
+            await db.set(target_key, encrypted_value)
     except redis.ResponseError as err:  # Для ACL ошибок
         if "NOPERM" in str(err):
             logger.warning("ACL violation attempt")
@@ -378,7 +424,8 @@ async def delete_data(
     target_key = to_safe_key(raw_hash)
 
     try:
-        deleted = await db.delete(target_key)
+        with cb:
+            deleted = await db.delete(target_key)
     except redis.ResponseError as err:  # Для ACL ошибок
         if "NOPERM" in str(err):
             logger.warning("ACL violation attempt")

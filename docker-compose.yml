@@ -24,6 +24,14 @@ services:
         target: master_key
     volumes:
       - .:/app
+    healthcheck:
+      # Добавляем context, чтобы python не падал на проверке SSL сертификата
+      test: ["CMD", "python", "-c", "import urllib.request, ssl; context = ssl._create_unverified_context(); urllib.request.urlopen('https://localhost:5001/health', context=context)"]
+      interval: 60s # Пока отлаживаем, сделаем почаще
+      timeout: 5s      # Ждать ответа не больше 5 секунд
+      retries: 3       # Если 3 раза подряд упало — значит, всё плохо
+      start_period: 5s # Дать приложению 5 секунд на прогрев перед первой проверкой
+
   redis:
     image: redis:7.2-alpine
     container_name: sihatod_redis
