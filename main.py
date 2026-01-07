@@ -1,5 +1,4 @@
 import hashlib
-import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -398,5 +397,5 @@ async def delete_data(
 
 if __name__ == "__main__":
     # Читаем из окружения, по умолчанию ставим безопасный localhost
-    listen_host = os.getenv("APP_HOST", "127.0.0.1")
-    uvicorn.run("main:app", host=listen_host, port=5001, reload=False)
+    # listen_host = os.getenv("APP_HOST", "127.0.0.1")
+    uvicorn.run("main:app", host=settings.app_host, port=settings.app_port, reload=False)
