@@ -8,10 +8,12 @@ from cryptography.hazmat.primitives import serialization
 from fastapi import HTTPException, Response
 from redis.asyncio import Redis
 
+from config import settings
+
 # Настройки
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
-REFRESH_TOKEN_EXPIRE_DAYS = 7
-ALGORITHM = "EdDSA"
+# ACCESS_TOKEN_EXPIRE_MINUTES = 15
+# REFRESH_TOKEN_EXPIRE_DAYS = 7
+# ALGORITHM = "EdDSA"
 
 
 def get_secret(name):
@@ -42,28 +44,29 @@ class AuthService:
         # 1. Access Token
         access_claims = {
             "sub": user_id,
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+            "exp": datetime.now(timezone.utc)
+            + timedelta(minutes=settings.access_token_expire_minutes),
             "iat": datetime.now(timezone.utc),
             "jti": token_id,
             "type": "access",
         }
-        access_token = jwt.encode(access_claims, PRIVATE_KEY, algorithm=ALGORITHM)
+        access_token = jwt.encode(access_claims, PRIVATE_KEY, algorithm=settings.algorithm)
 
         # 2. Refresh Token
         refresh_claims = {
             "sub": user_id,
-            "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+            "exp": datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days),
             "iat": datetime.now(timezone.utc),
             "jti": token_id,
             "type": "refresh",
         }
-        refresh_token = jwt.encode(refresh_claims, PRIVATE_KEY, algorithm=ALGORITHM)
+        refresh_token = jwt.encode(refresh_claims, PRIVATE_KEY, algorithm=settings.algorithm)
 
         return access_token, refresh_token
 
     async def rotate_tokens(self, old_refresh_token: str) -> Tuple[str, str]:
         try:
-            payload = jwt.decode(old_refresh_token, PUBLIC_KEY, algorithms=[ALGORITHM])
+            payload = jwt.decode(old_refresh_token, PUBLIC_KEY, algorithms=[settings.algorithm])
         except jwt.PyJWTError as err:
             raise HTTPException(status_code=401, detail="Invalid token") from err
 
@@ -100,7 +103,7 @@ class AuthService:
             httponly=True,  # JS не имеет доступа
             secure=True,  # Только HTTPS
             samesite="strict",  # Защита от CSRF
-            max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            max_age=settings.access_token_expire_minutes * 60,
         )
 
         # Refresh Token: виден ТОЛЬКО на эндпоинте обновления
@@ -111,7 +114,7 @@ class AuthService:
             secure=True,
             samesite="strict",
             path="/auth/refresh",  # Усиление безопасности
-            max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+            max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
         )
 
     @staticmethod
@@ -121,7 +124,7 @@ class AuthService:
 
     def verify_access_token(self, token: str) -> str:
         try:
-            payload = jwt.decode(token, PUBLIC_KEY, algorithms=[ALGORITHM])
+            payload = jwt.decode(token, PUBLIC_KEY, algorithms=[settings.algorithm])
             if payload["type"] != "access":
                 raise HTTPException(status_code=401, detail="Invalid token type")
             return payload["sub"]

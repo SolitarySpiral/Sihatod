@@ -1,10 +1,9 @@
 import hashlib
-import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, AsyncGenerator, List, Optional
-from urllib.parse import urlparse
 
 import redis.asyncio as redis
 import uvicorn
@@ -14,31 +13,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from audit_middleware import AuditMiddleware
 from auth import AuthService
+from config import settings
 
 # Вычисляем путь относительно этого файла (main.py)
 BASE_DIR = Path(__file__).resolve().parent
-CERTS_DIR = Path("/run/secrets/")  # BASE_DIR / "certs"
+CERTS_DIR = settings.certs_path  # Path("/run/secrets/")  # BASE_DIR / "certs"
 
 load_dotenv()  # Эта команда ищет файл .env и загружает его в os.environ
-# Настройка логирования для отслеживания инцидентов безопасности
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
+
+# Настройка красивого вывода (можно вынести в отдельную функцию setup_logging)
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
+    level="INFO" if not settings.debug else "DEBUG",
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1. Создаем отдельное долгоживущее соединение для лимитера
     # Используем твои настройки из get_redis
-    url = urlparse(REDIS_URL)
+    # url = urlparse(settings.redis_url)
     limiter_redis = redis.Redis(
-        host=url.hostname,
-        port=url.port or 6379,
-        username=url.username,
-        password=url.password,
-        db=int(url.path.lstrip("/") or 0),
+        host=settings.redis_url.host,
+        port=settings.redis_url.port or 6379,
+        username=settings.redis_url.username,
+        password=settings.redis_url.password,
+        db=int(settings.redis_url.path.lstrip("/")) or 0,  # int(url.path.lstrip("/") or 0),
         decode_responses=True,
         ssl=True,
         ssl_ca_certs=str(CERTS_DIR / "ca.crt"),
@@ -61,20 +69,20 @@ async def lifespan(app: FastAPI):
 
 
 # --- КОНФИГУРАЦИЯ ---
-REDIS_URL = os.environ.get("REDIS_URL")
-KEY_PREFIX = "sihatod:"
-# Отключаем документацию на проде через переменную окружения
-DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+# REDIS_URL = os.environ.get("REDIS_URL")
+# KEY_PREFIX = "sihatod:"
+# # Отключаем документацию на проде через переменную окружения
+# DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
-if not REDIS_URL:
+if not settings.redis_url:
     logger.critical("REDIS_URL is missing in environment variables")
     raise RuntimeError("Application misconfigured: REDIS_URL required")
 app = FastAPI(
     title="Sihatod Secure API",
     version="2.0.0",
     lifespan=lifespan,
-    docs_url="/docs" if DEBUG else None,
-    redoc_url="/redoc" if DEBUG else None,
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None,
 )
 # 1. Защита от подмены Host
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "sihatod.com"])
@@ -87,6 +95,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+app.add_middleware(AuditMiddleware)
 
 
 # 3. Security Headers
@@ -115,14 +125,14 @@ async def add_security_headers(request: Request, call_next):
 
 async def get_redis() -> AsyncGenerator[redis.Redis, None]:
     # 1. Парсим REDIS_URL из .env
-    url = urlparse(REDIS_URL)
+    # url = urlparse(settings.redis_url)
 
     client = redis.Redis(
-        host=url.hostname,
-        port=url.port or 6379,
-        username=url.username,
-        password=url.password,
-        db=int(url.path.lstrip("/") or 0),
+        host=settings.redis_url.host,
+        port=settings.redis_url.port or 6379,
+        username=settings.redis_url.username,
+        password=settings.redis_url.password,
+        db=int(settings.redis_url.path.lstrip("/") or 0),
         decode_responses=True,
         ssl=True,
         ssl_ca_certs=str(CERTS_DIR / "ca.crt"),
@@ -210,9 +220,9 @@ async def me(user_id: UserDep):
 # --- СЛУЖЕБНАЯ ЛОГИКА ---
 def to_safe_key(user_key: str) -> str:
     """Гарантирует, что ключ соответствует ACL политикам (префикс sihatod:)."""
-    if user_key.startswith(KEY_PREFIX):
+    if user_key.startswith(settings.key_prefix):
         return user_key
-    return f"{KEY_PREFIX}{user_key}"
+    return f"{settings.key_prefix}{user_key}"
 
 
 def generate_internal_hash(client_key: str, attr: str) -> str:
