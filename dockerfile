@@ -21,7 +21,7 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-root --only main
 
 # 5. Копирование кода
-COPY main.py auth.py crypto.py ./
+COPY main.py auth.py crypto.py config.py audit_middleware.py ./
 
 # 6. Права доступа
 # Устанавливаем права: только чтение кода для пользователя
@@ -36,6 +36,6 @@ USER 10001
 CMD ["uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "5001", \
-     "--workers", "4", \
+     "--workers", "2", \
      "--ssl-keyfile", "./certs/redis.key", \
      "--ssl-certfile", "./certs/redis.crt"]
