@@ -19,7 +19,8 @@ dependencies = [
     "bcrypt (>=5.0.0,<6.0.0)",
     "httpx[http2] (>=0.28.1,<0.29.0)",
     "pydantic-settings (>=2.12.0,<3.0.0)",
-    "loguru (>=0.7.3,<0.8.0)"
+    "loguru (>=0.7.3,<0.8.0)",
+    "aiocircuitbreaker (>=2.0.0,<3.0.0)",
 ]
 
 
